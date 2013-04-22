@@ -1,7 +1,7 @@
 #define _GNU_SOURCE
 #include <assert.h>
-#include <errno.h>
 #include <dirent.h>
+#include <errno.h>
 #include <inttypes.h>
 #include <poll.h>
 #include <signal.h>
@@ -199,17 +199,31 @@ synthetic_comms_for_pid(uint32_t pid)
 	closedir(dir);
 }
 
+struct kmodule {
+	uint64_t start;
+	char *name;
+};
+
+static int
+kmodule_cmp(const void *a, const void *b) {
+	uint64_t as, bs;
+
+	as = ((const struct kmodule *)a)->start;
+	bs = ((const struct kmodule *)b)->start;
+	return as < bs ? -1 : as > bs ? 1 : 0;
+}
+
 static void
 synthetic_mmaps_for_kernel(void)
 {
-	static const char *emptymod = "[kernel.kallsyms]_text";
+	static const char *kmodname = "[kernel.kallsyms]_text";
 	struct perf_info_mmap info;
 	struct our_sample_id_all id;
-	FILE *kallsyms;
+	FILE *modules, *kallsyms;
 	char *linebuf = NULL;
 	size_t linebufsize;
-	uint64_t addr;
-	char *mod = NULL;
+	struct kmodule *mod_acc;
+	size_t mod_read, mod_alloc, i;
 
 	kallsyms = fopen("/proc/kallsyms", "r");
 	if (!kallsyms) {
@@ -217,55 +231,76 @@ synthetic_mmaps_for_kernel(void)
 		    strerror(errno));
 		return;
 	}
+	mod_acc = malloc(sizeof(mod_acc[0]));
+	mod_alloc = 1;
+	mod_read = 1;
+	mod_acc[0].start = 0;
+	mod_acc[0].name = strdup(kmodname);
+	for (;;) {
+		ssize_t linesize;
+		linesize = getline(&linebuf, &linebufsize, kallsyms);
+		if (linesize <= 0)
+			break;
+		if (strchr(linebuf, '\t'))
+			// Can this actually happen?
+			continue;
+		mod_acc[0].start = strtoull(linebuf, NULL, 16);
+		break;
+	}
+	fclose(kallsyms);
+
+	modules = fopen("/proc/modules", "r");
+	if (!modules) {
+		fprintf(stderr, "fopen: %s: %s\n", "/proc/modules",
+		    strerror(errno));
+		return;
+	}
+
+	for (;;) {
+		struct kmodule thismod;
+		ssize_t linesize;
+		char *space;
+
+		linesize = getline(&linebuf, &linebufsize, modules);
+		if (linesize <= 0)
+			break;
+		linebuf[linesize - 1] = '\0';
+		space = strchr(linebuf, ' ');
+		if (!space)
+			continue;
+		*space = '\0';
+		if (sscanf(space + 1, "%*s %*s %*s %*s %"PRIx64,
+			&thismod.start) < 1)
+			continue;
+		asprintf(&thismod.name, "[%s]", linebuf);
+		if (mod_read >= mod_alloc) {
+			mod_alloc = mod_alloc * 2 + 1;
+			mod_acc = realloc(mod_acc, mod_alloc
+			    * sizeof(mod_acc[0]));
+		}
+		mod_acc[mod_read++] = thismod;
+	}
+	free(linebuf);
+	fclose(modules);
+	qsort(mod_acc, mod_read, sizeof(mod_acc[0]), kmodule_cmp);
 
 	id.time = 0;
 	id.cpu = id.res = 0;
 	id.pid = info.pid = -1;
 	id.tid = info.tid = 0;
 	info.offset = 0;
-	for(;;) {
-		const char *newmod;
-		ssize_t linesize;
-		int modstart;
+	for (i = 0; i < mod_read; ++i) {
+		const char* fixed_name;
+		uint64_t modend;
 
-		linesize = getline(&linebuf, &linebufsize, kallsyms);
-		if (linesize <= 0) {
-			if (mod) {
-				info.len = 0 - info.addr;
-				synthetic_mmap(&info, &id,
-				    mod[0] ? mod + 1 : emptymod,
-				    PERF_RECORD_MISC_KERNEL);
-				free(mod);
-			}
-			break;
-		}
-		linebuf[linesize - 1] = '\0';
-
-		modstart = -1;
-		sscanf(linebuf, "%"PRIx64" %*c %*[^\t]%n", &addr, &modstart);
-		if (modstart < 0) {
-			fprintf(stderr, "Bad line in /proc/kallsyms: %s\n",
-			    linebuf);
-			continue;
-		}
-		newmod = linebuf + modstart;
-		if (mod && strcmp(mod, newmod) != 0) {
-			info.len = addr - info.addr;
-			synthetic_mmap(&info, &id,
-			    mod[0] ? mod + 1 : emptymod,
-			    PERF_RECORD_MISC_KERNEL);
-			free(mod);
-			mod = NULL;
-			mod = strdup(newmod);
-			info.addr = addr;
-		}
-		if (!mod) {
-			mod = strdup(newmod);
-			info.addr = addr;
-		}
+		modend = i + 1 < mod_read ? mod_acc[i + 1].start : 0;
+		info.addr = mod_acc[i].start;
+		info.len = modend - info.addr;
+		synthetic_mmap(&info, &id, mod_acc[i].name,
+		    PERF_RECORD_MISC_KERNEL);
+		free(mod_acc[i].name);
 	}
-	free(linebuf);
-	fclose(kallsyms);
+	free(mod_acc);
 }
 
 static uint32_t *pidmap = NULL;
