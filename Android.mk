@@ -84,6 +84,15 @@ LOCAL_FORCE_STATIC_EXECUTABLE := true	# since this is setuid root
 LOCAL_SHARED_LIBRARIES :=
 include $(BUILD_EXECUTABLE)
 
+include $(CLEAR_VARS)
+LOCAL_MODULE       := miniperf-record
+LOCAL_MODULE_TAGS  := optional
+LOCAL_MODULE_CLASS := EXECUTABLES
+LOCAL_SRC_FILES    := miniperf/miniperf-record.c
+LOCAL_C_INCLUDES   := miniperf
+LOCAL_CFLAGS       := -DNO_GETLINE
+include $(BUILD_EXECUTABLE)
+
 $(OUT_DOCS)/api-stubs-timestamp:
 	mkdir -p `dirname $@`
 	touch $@
