@@ -19,6 +19,65 @@
 #include "perf.h"
 #include "miniperf.h"
 
+static struct eventtab_elem {
+	const char *name;
+	// NOTE these next two fields could be abbreviated to save space
+	uint32_t type;
+	uint64_t config;
+} eventtab[] = {
+	{ "cpu-cycles",
+	  PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES },
+	{ "cycles",
+	  PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES },
+	{ "instructions",
+	  PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS },
+	{ "cache-references",
+	  PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_REFERENCES },
+	{ "cache-misses",
+	  PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_MISSES },
+	{ "branch-instructions",
+	  PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_INSTRUCTIONS },
+	{ "branches",
+	  PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_INSTRUCTIONS },
+	{ "branch-misses",
+	  PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_MISSES },
+	{ "bus-cycles",
+	  PERF_TYPE_HARDWARE, PERF_COUNT_HW_BUS_CYCLES },
+	{ "stalled-cycles-frontend",
+	  PERF_TYPE_HARDWARE, PERF_COUNT_HW_STALLED_CYCLES_FRONTEND },
+	{ "idle-cycles-frontend",
+	  PERF_TYPE_HARDWARE, PERF_COUNT_HW_STALLED_CYCLES_FRONTEND },
+	{ "stalled-cycles-backend",
+	  PERF_TYPE_HARDWARE, PERF_COUNT_HW_STALLED_CYCLES_BACKEND },
+	{ "idle-cycles-backend",
+	  PERF_TYPE_HARDWARE, PERF_COUNT_HW_STALLED_CYCLES_BACKEND },
+
+	{ "cpu-clock",
+	  PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CPU_CLOCK },
+	{ "task-clock",
+	  PERF_TYPE_SOFTWARE, PERF_COUNT_SW_TASK_CLOCK },
+	{ "page-faults",
+	  PERF_TYPE_SOFTWARE, PERF_COUNT_SW_PAGE_FAULTS },
+	{ "faults",
+	  PERF_TYPE_SOFTWARE, PERF_COUNT_SW_PAGE_FAULTS },
+	{ "minor-faults",
+	  PERF_TYPE_SOFTWARE, PERF_COUNT_SW_PAGE_FAULTS_MIN },
+	{ "major-faults",
+	  PERF_TYPE_SOFTWARE, PERF_COUNT_SW_PAGE_FAULTS_MAJ },
+	{ "context-switches",
+	  PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CONTEXT_SWITCHES },
+	{ "cs",
+	  PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CONTEXT_SWITCHES },
+	{ "cpu-migrations",
+	  PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CPU_MIGRATIONS },
+	{ "alignment-faults",
+	  PERF_TYPE_SOFTWARE, PERF_COUNT_SW_ALIGNMENT_FAULTS },
+	{ "emulation-faults",
+	  PERF_TYPE_SOFTWARE, PERF_COUNT_SW_EMULATION_FAULTS }
+};
+static const int eventtab_len = sizeof(eventtab) / sizeof(eventtab[0]);
+
+
 #ifdef NO_GETLINE
 static ssize_t minigetline(char **lineptr, size_t *n, FILE *stream);
 #define getline minigetline
@@ -41,9 +100,6 @@ struct our_sample_id_all {
 
 #define ROUNDUP8(x) (((x) + 7) & ~7)
 static const char zeroes[7] = { 0, 0, 0, 0, 0, 0, 0 };
-
-#define BUF_PAGES_SHIFT 5
-#define BUF_PAGES (1UL << BUF_PAGES_SHIFT)
 
 static FILE *outfile;
 static volatile sig_atomic_t exiting = 0;
@@ -374,51 +430,109 @@ event_snoop(uint8_t *ring, size_t ringsize, size_t idx)
 int
 main(int argc, char **argv)
 {
-	int cpus, i, live;
+	int cpus, i, live, opt;
 	size_t page_size, buf_size;
 	struct pollfd *fds;
+	struct miniperf_header header = MINIPERF_HEADER_INIT(0);
 	volatile struct perf_event_mmap_page **bufs;
-	const uint64_t sample_type =
+	struct perf_event_attr attr;
+	const char *outfilename = "miniperf.data";
+	size_t buf_pages = 32;
+	char *cp;
+
+	memset(&attr, 0, sizeof(attr));
+	attr.type = PERF_TYPE_SOFTWARE;
+	attr.size = sizeof(struct perf_event_attr);
+	attr.config = PERF_COUNT_SW_CPU_CLOCK;
+	attr.freq = 1;
+	attr.sample_freq = 4000;
+	attr.sample_type =
 	    PERF_SAMPLE_IP |
 	    PERF_SAMPLE_TID |
 	    PERF_SAMPLE_TIME |
 	    PERF_SAMPLE_CALLCHAIN |
 	    PERF_SAMPLE_CPU |
 	    PERF_SAMPLE_PERIOD;
-	const struct miniperf_header header =
-	    MINIPERF_HEADER_INIT(sample_type);
+	attr.read_format = 0;
+	attr.inherit = 1;
+	attr.mmap = 1;
+	attr.comm = 1;
+	attr.task = 1;
+	attr.precise_ip = 0; // ???
+	attr.sample_id_all = 1;
+
+	while ((opt = getopt(argc, argv, "age:c:F:m:o:")) != -1) {
+		switch(opt) {
+		case 'a':
+		case 'g':
+			// Ignored; for compatibility.
+			break;
+		case 'e':
+			for (i = 0; i < eventtab_len; ++i)
+				if (strcmp(optarg, eventtab[i].name) == 0)
+					break;
+			if (i >= eventtab_len) {
+				fprintf(stderr, "%s: %s: invalid event name\n",
+				    argv[0], optarg);
+				return 1;
+			}
+			attr.type = eventtab[i].type;
+			attr.config = eventtab[i].config;
+			break;
+		case 'c':
+			attr.freq = 0;
+			attr.sample_period = strtoull(optarg, &cp, 0);
+			if (!*optarg || *cp) {
+				fprintf(stderr, "%s: %s: invalid sample %s\n",
+				    argv[0], optarg, "period");
+				return 1;
+			}
+			break;
+		case 'F':
+			attr.freq = 1;
+			attr.sample_freq =  strtoull(optarg, &cp, 0);
+			if (!*optarg || *cp) {
+				fprintf(stderr, "%s: %s: invalid sample %s\n",
+				    argv[0], optarg, "frequency");
+				return 1;
+			}
+			break;
+		case 'm':
+			buf_pages = strtoul(optarg, &cp, 0);
+			if (!*optarg || *cp
+			    || (buf_pages & (buf_pages - 1)) != 0) {
+				fprintf(stderr, "%s: %s: invalid number"
+				    " of pages\n", argv[0], optarg);
+				return 1;
+			}
+			break;
+		case 'o':
+			outfilename = optarg;
+			break;
+		case '?':
+			// Bionic does something odd here, so add a newline.
+			fprintf(stderr, "\n%s: invalid option -%c\n",
+			    argv[0], optopt);
+			return 1;
+		default:
+			assert(false);
+		}
+	}
 
 	umask(0077);
-	outfile = fopen("miniperf.data", "wb");
+	outfile = fopen(outfilename, "wb");
 	if (!outfile) {
-		fprintf(stderr, "fopen: %s: %s\n", "miniperf.data",
+		fprintf(stderr, "fopen: %s: %s\n", outfilename,
 		    strerror(errno));
 		return 1;
 	}
 
 	cpus = sysconf(_SC_NPROCESSORS_CONF);
 	page_size = sysconf(_SC_PAGESIZE);
-	buf_size = page_size * BUF_PAGES;
+	buf_size = page_size * buf_pages;
 	fds = calloc(cpus, sizeof(fds[0]));
 	bufs = calloc(cpus, sizeof(bufs[0]));
 	for (i = 0; i < cpus; ++i) {
-		struct perf_event_attr attr;
-
-		memset(&attr, 0, sizeof(attr));
-		attr.type = PERF_TYPE_HARDWARE;
-		attr.size = sizeof(struct perf_event_attr);
-		attr.config = PERF_COUNT_HW_CPU_CYCLES;
-		attr.freq = 1;
-		attr.sample_freq = 4000;
-		attr.sample_type = sample_type;
-		attr.read_format = 0;
-		attr.inherit = 1;
-		attr.mmap = 1;
-		attr.comm = 1;
-		attr.task = 1;
-		attr.precise_ip = 0; // ???
-		attr.sample_id_all = 1; // ???
-
 		fds[i].fd = syscall(__NR_perf_event_open, &attr, -1, i, -1, 0);
 		if (fds[i].fd < 0) {
 			perror("perf_event_open");
@@ -437,6 +551,7 @@ main(int argc, char **argv)
 	signal(SIGINT, start_exiting);
 	signal(SIGHUP, start_exiting);
 
+	header.sample_type = attr.sample_type;
 	fwrite(&header, sizeof(header), 1, outfile);
 	synthetic_mmaps_for_kernel();
 	mark_pid(0);
