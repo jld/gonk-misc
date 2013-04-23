@@ -530,6 +530,7 @@ main(int argc, char **argv)
 	cpus = sysconf(_SC_NPROCESSORS_CONF);
 	page_size = sysconf(_SC_PAGESIZE);
 	buf_size = page_size * buf_pages;
+	setbuffer(outfile, malloc(buf_size), buf_size);
 	fds = calloc(cpus, sizeof(fds[0]));
 	bufs = calloc(cpus, sizeof(bufs[0]));
 	for (i = 0; i < cpus; ++i) {
