@@ -195,9 +195,13 @@ synthetic_mmaps_for_pid(uint32_t pid)
 			continue;
 		}
 		info.len -= info.addr;
-		if (strchr(prot, 'x'))
-			synthetic_mmap(&info, &id, linebuf + nameoff,
-			    PERF_RECORD_MISC_USER);
+		if (strchr(prot, 'x')) {
+			const char *name = linebuf + nameoff;
+
+			if (*name == '\0')
+				name = "//anon";
+			synthetic_mmap(&info, &id, name, PERF_RECORD_MISC_USER);
+		}
 	}
 	free(linebuf);
 	fclose(maps);
