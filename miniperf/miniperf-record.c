@@ -350,7 +350,6 @@ synthetic_mmaps_for_kernel(void)
 	id.tid = info.tid = 0;
 	info.offset = 0;
 	for (i = 0; i < mod_read; ++i) {
-		const char* fixed_name;
 		uint64_t modend;
 
 		modend = i + 1 < mod_read ? mod_acc[i + 1].start : 0;
@@ -465,7 +464,7 @@ main(int argc, char **argv)
 	attr.precise_ip = 0; // ???
 	attr.sample_id_all = 1;
 
-	while ((opt = getopt(argc, argv, "age:c:F:m:o:")) != -1) {
+	while ((opt = getopt(argc, argv, "age:c:F:m:o:S:")) != -1) {
 		switch(opt) {
 		case 'a':
 		case 'g':
@@ -513,13 +512,26 @@ main(int argc, char **argv)
 		case 'o':
 			outfilename = optarg;
 			break;
+		case 'S':
+			attr.sample_stack_user = strtoul(optarg, &cp, 0);
+			if (!*optarg || *cp) {
+				fprintf(stderr, "%s: %s: invalid stack capture"
+				    " size\n", argv[0], optarg);
+				return 1;
+			}
+			if (attr.sample_stack_user > 0) {
+				attr.sample_type |= PERF_SAMPLE_STACK_USER
+				    | PERF_SAMPLE_REGS_USER;
+				attr.sample_regs_user = 0xffff;
+			}
+			break;
 		case '?':
 			// Bionic does something odd here, so add a newline.
 			fprintf(stderr, "\n%s: invalid option -%c\n",
 			    argv[0], optopt);
 			return 1;
 		default:
-			assert(false);
+			assert(0);
 		}
 	}
 
