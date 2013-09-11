@@ -385,9 +385,8 @@ synthetic_mmaps_for_kernel(void)
 	}
 }
 
-
 static size_t
-event_snoop(uint8_t *ring, size_t ringsize, size_t idx)
+event_write(uint8_t *ring, size_t ringsize, size_t idx)
 {
 	void *record = ring + (idx % ringsize);
 	bool alloced = false;
@@ -401,6 +400,7 @@ event_snoop(uint8_t *ring, size_t ringsize, size_t idx)
 		alloced = true;
 		memcpy(record, ring + (idx % ringsize), first);
 		memcpy((char*)record + first, ring, header->size - first);
+		header = reinterpret_cast<perf_event_header *>(record);
 	}
 
 	switch (header->type) {
@@ -411,7 +411,9 @@ event_snoop(uint8_t *ring, size_t ringsize, size_t idx)
 			uint32_t pid, tid;
 			uint64_t time;
 			uint32_t cpu, res;
-		} const *sample = reinterpret_cast<perf_sample *>(record);
+			uint64_t stack_nr;
+			uint64_t stack[0];
+		} *sample = reinterpret_cast<perf_sample *>(record);
 
 		if (!test_pid(sample->pid)) {
 			synthetic_comms_for_pid(sample->pid);
@@ -450,9 +452,15 @@ event_snoop(uint8_t *ring, size_t ringsize, size_t idx)
 		}
 	}	break;
 	}
+
+	if (fwrite(record, header->size, 1, outfile) < 1) {
+		perror("fwrite");
+		exit(1);
+	}
+	size_t size = header->size;
 	if (alloced)
 		free(record);
-	return header->size;
+	return size;
 }
 
 
@@ -623,27 +631,7 @@ main(int argc, char **argv)
 			tail = bufs[i]->data_tail;
 			rmb();
 			while (head > tail) {
-				size_t to_write;
-
-				to_write = event_snoop(base, buf_size, tail);
-				assert(to_write > 0);
-				while (to_write > 0) {
-					size_t end, written;
-
-					end = tail + to_write;
-					if (end / buf_size != tail / buf_size)
-						end = (end / buf_size)
-						    * buf_size;
-					written =
-					    fwrite(base + (tail % buf_size),
-						1, end - tail, outfile);
-					if (written == 0) {
-						perror("fwrite");
-						return 1;
-					}
-					tail += written;
-					to_write -= written;
-				}
+				tail += event_write(base, buf_size, tail);
 				bufs[i]->data_tail = tail;
 			}
 			if (exiting) {
