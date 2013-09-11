@@ -138,6 +138,15 @@ enum perf_event_sample_format {
 };
 
 /*
+ * Values to determine ABI of the registers dump.
+ */
+enum perf_sample_regs_abi {
+	PERF_SAMPLE_REGS_ABI_NONE	= 0,
+	PERF_SAMPLE_REGS_ABI_32		= 1,
+	PERF_SAMPLE_REGS_ABI_64		= 2,
+};
+
+/*
  * The format of the data returned by read() on a perf event fd,
  * as specified by attr.read_format:
  *

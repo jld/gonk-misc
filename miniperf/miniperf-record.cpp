@@ -392,6 +392,7 @@ event_write(uint8_t *ring, size_t ringsize, size_t idx)
 	bool alloced = false;
 	const perf_event_header *header =
 	    reinterpret_cast<perf_event_header *>(record);
+	size_t orig_size = header->size;
 
 	if (idx / ringsize != (idx + header->size) / ringsize) {
 		size_t first = ringsize - (idx % ringsize);
@@ -419,6 +420,54 @@ event_write(uint8_t *ring, size_t ringsize, size_t idx)
 			synthetic_comms_for_pid(sample->pid);
 			synthetic_mmaps_for_pid(sample->pid);
 		}
+		uint64_t *stuff = &sample->stack[sample->stack_nr];
+		uint64_t abi = *stuff++;
+		if (abi != PERF_SAMPLE_REGS_ABI_32) {
+			stuff--;
+			size_t needed = (char*)stuff - (char*)sample;
+			// Ugh, duplication.
+			record = malloc(needed);
+			memcpy(record, sample, needed);
+			header = reinterpret_cast<perf_event_header *>(record);
+			sample = reinterpret_cast<perf_sample *>(record);
+			sample->header.size = needed;
+			break;
+		}
+		uint32_t regs[16];
+		for (unsigned i = 0; i < 16; ++i)
+			regs[i] = *(stuff++);
+		uint64_t stack_space = *stuff++, stack_used = 0;
+		uint64_t *stack = stuff;
+		stuff += stack_space / 8;
+		if (stack_space > 0)
+			stack_used = *stuff;
+
+		static const size_t max_frames = 256;
+		uint32_t frames[max_frames];
+		size_t frames_gotten = EHUnwind(pidmap[sample->pid], regs,
+		    stack, stack_used, frames, max_frames);
+
+		size_t i;
+		for (i = 0; i < sample->stack_nr; ++i)
+			if (sample->stack[i] == PERF_CONTEXT_USER) // FIXME
+				break;
+		// Can't mutate the kernel buffer in place.
+		size_t needed = (char*)&sample->stack[i + 1 + frames_gotten]
+		    - (char*)sample;
+		if (!alloced) {
+			record = malloc(needed);
+			alloced = true;
+			memcpy(record, sample, needed - 8 * frames_gotten);
+			header = reinterpret_cast<perf_event_header *>(record);
+			sample = reinterpret_cast<perf_sample *>(record);
+		}
+		sample->header.size = needed;
+
+		if (i >= sample->stack_nr)
+			sample->stack[i] = PERF_CONTEXT_USER;
+		sample->stack_nr = ++i;
+		for (i = 0; i < frames_gotten; ++i)
+			sample->stack[sample->stack_nr++] = frames[i];
 	}	break;
 	case PERF_RECORD_FORK: {
 		struct perf_fork {
@@ -457,10 +506,9 @@ event_write(uint8_t *ring, size_t ringsize, size_t idx)
 		perror("fwrite");
 		exit(1);
 	}
-	size_t size = header->size;
 	if (alloced)
 		free(record);
-	return size;
+	return orig_size;
 }
 
 
@@ -487,8 +535,13 @@ main(int argc, char **argv)
 	    PERF_SAMPLE_IP |
 	    PERF_SAMPLE_TID |
 	    PERF_SAMPLE_TIME |
+	    PERF_SAMPLE_CPU |
 	    PERF_SAMPLE_CALLCHAIN |
-	    PERF_SAMPLE_CPU;
+	    PERF_SAMPLE_REGS_USER |
+	    PERF_SAMPLE_STACK_USER;
+	attr.sample_regs_user = 0xffff;
+	attr.sample_stack_user = 48 << 10;
+//	attr.exclude_callchain_user = 1;
 	attr.read_format = 0;
 	attr.inherit = 1;
 	attr.mmap = 1;
@@ -552,11 +605,6 @@ main(int argc, char **argv)
 				    " size\n", argv[0], optarg);
 				return 1;
 			}
-			if (attr.sample_stack_user > 0) {
-				attr.sample_type |= PERF_SAMPLE_STACK_USER
-				    | PERF_SAMPLE_REGS_USER;
-				attr.sample_regs_user = 0xffff;
-			}
 			break;
 		case '?':
 			// Bionic does something odd here, so add a newline.
@@ -603,7 +651,8 @@ main(int argc, char **argv)
 	signal(SIGINT, start_exiting);
 	signal(SIGHUP, start_exiting);
 
-	header.sample_type = attr.sample_type;
+	header.sample_type = attr.sample_type
+	    & ~(PERF_SAMPLE_REGS_USER | PERF_SAMPLE_STACK_USER);
 	fwrite(&header, sizeof(header), 1, outfile);
 	synthetic_mmaps_for_kernel();
 	test_pid(0);
