@@ -501,7 +501,7 @@ EHTable::EHTable(FILE *aELF, const std::string &aName)
   if (!phbuf)
     return;
   fseek(aELF, file.e_phoff, SEEK_SET);
-  if (fread(aELF, file.e_phnum * file.e_phentsize, 1, aELF) < 1) {
+  if (fread(phbuf, file.e_phnum * file.e_phentsize, 1, aELF) < 1) {
     free(phbuf);
     return;
   }
@@ -570,6 +570,8 @@ void EHAddrSpace::mmap(uint32_t aAddr, uint32_t aLen, const char *aPath,
       mMaps[i] = new EHMapping(table, aAddr, aAddr + aLen, mappedAddr, mMaps[i]);
 }
 
+std::map<std::string, const EHTable *> EHAddrSpace::sCache;
+
 const EHTable *EHAddrSpace::mapFile(const char *aPath) {
   std::string path(aPath);
   std::map<std::string, const EHTable *>::iterator i = sCache.find(path);
@@ -577,11 +579,15 @@ const EHTable *EHAddrSpace::mapFile(const char *aPath) {
   if (i != sCache.end())
     return i->second;
 
+  EHTable *tab = NULL;
   FILE *fh = fopen(aPath, "rb");
-  EHTable *tab = new EHTable(fh, path);
-  if (!tab->isValid()) {
-    delete tab;
-    tab = NULL;
+  if (fh) {
+    tab = new EHTable(fh, path);
+    fclose(fh);
+    if (!tab->isValid()) {
+      delete tab;
+      tab = NULL;
+    }
   }
   sCache[path] = tab;
   return tab;

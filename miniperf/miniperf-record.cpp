@@ -18,11 +18,12 @@
 
 #include <vector>
 #include <algorithm>
-#include <set>
+#include <map>
 
 #include "perf_event.h"
 #include "perf.h"
 #include "miniperf.h"
+#include "ehabi_unwind.h"
 
 static struct eventtab_elem {
 	const char *name;
@@ -97,6 +98,12 @@ struct perf_info_comm {
 	uint32_t pid, tid;
 };
 
+struct perf_info_fork {
+	uint32_t pid, ppid;
+	uint32_t tid, ptid;
+	uint64_t time;
+};
+
 struct our_sample_id_all {
 	uint32_t pid, tid;
 	uint64_t time;
@@ -113,6 +120,26 @@ static void
 start_exiting(int unused)
 {
 	exiting = 1;
+}
+
+
+static std::map<uint32_t, EHAddrSpace *> pidmap;
+
+static bool
+test_pid(uint32_t pid)
+{
+	auto i = pidmap.find(pid);
+	if (i == pidmap.end()) {
+		pidmap[pid] = EHNewSpace();
+		return false;
+	}
+	return true;
+}
+
+static void
+fork_pid(uint32_t pid, uint32_t ppid)
+{
+	pidmap[pid] = EHForkSpace(pidmap[ppid]);
 }
 
 
@@ -180,6 +207,7 @@ synthetic_mmaps_for_pid(uint32_t pid)
 		return;
 	};
 	free(name);
+	EHAddrSpace *space = pidmap[pid];
 	for (;;) {
 		ssize_t linesize;
 		char prot[5];
@@ -205,6 +233,8 @@ synthetic_mmaps_for_pid(uint32_t pid)
 
 			if (*name == '\0')
 				name = "//anon";
+			if (name[0] == '/' && name[1] != '/')
+				EHAddMMap(space, info.addr, info.len, name, info.offset);
 			synthetic_mmap(&info, &id, name, PERF_RECORD_MISC_USER);
 		}
 	}
@@ -355,53 +385,73 @@ synthetic_mmaps_for_kernel(void)
 	}
 }
 
-static std::set<uint32_t> pidmap;
-
-static int
-test_pid(uint32_t pid)
-{
-	return pidmap.find(pid) != pidmap.end();
-}
-
-static void
-mark_pid(uint32_t pid)
-{
-	pidmap.insert(pid);
-}
 
 static size_t
 event_snoop(uint8_t *ring, size_t ringsize, size_t idx)
 {
-	static uint32_t pid, ppid;
+	void *record = ring + (idx % ringsize);
+	bool alloced = false;
+	const perf_event_header *header =
+	    reinterpret_cast<perf_event_header *>(record);
 
-	struct perf_event_header *header;
-	uint32_t *idptr;
+	if (idx / ringsize != (idx + header->size) / ringsize) {
+		size_t first = ringsize - (idx % ringsize);
 
-	header = (struct perf_event_header *)(ring + (idx % ringsize));
-	switch (header->type) {
-	case PERF_RECORD_SAMPLE:
-		idptr = (uint32_t *)(ring +
-		    (idx + sizeof(*header) + 8) % ringsize);
-		pid = idptr[0];
-		if (!test_pid(pid)) {
-			synthetic_comms_for_pid(pid);
-			synthetic_mmaps_for_pid(pid);
-			mark_pid(pid);
-		}
-		break;
-	case PERF_RECORD_FORK:
-		idptr = (uint32_t *)(ring +
-		    (idx + sizeof(*header)) % ringsize);
-		pid = idptr[0];
-		ppid = idptr[1];
-		if (!test_pid(ppid)) {
-			synthetic_comms_for_pid(ppid);
-			synthetic_mmaps_for_pid(ppid);
-			mark_pid(ppid);
-		}
-		mark_pid(pid);
-		break;
+		record = malloc(header->size);
+		alloced = true;
+		memcpy(record, ring + (idx % ringsize), first);
+		memcpy((char*)record + first, ring, header->size - first);
 	}
+
+	switch (header->type) {
+	case PERF_RECORD_SAMPLE: {
+		struct perf_sample {
+			perf_event_header header;
+			uint64_t ip;
+			uint32_t pid, tid;
+			uint64_t time;
+			uint32_t cpu, res;
+		} const *sample = reinterpret_cast<perf_sample *>(record);
+
+		if (!test_pid(sample->pid)) {
+			synthetic_comms_for_pid(sample->pid);
+			synthetic_mmaps_for_pid(sample->pid);
+		}
+	}	break;
+	case PERF_RECORD_FORK: {
+		struct perf_fork {
+			perf_event_header header;
+			perf_info_fork info;
+		} const *sample = reinterpret_cast<perf_fork *>(record);
+		const perf_info_fork *info = &sample->info;
+
+		if (!test_pid(info->ppid)) {
+			synthetic_comms_for_pid(info->ppid);
+			synthetic_mmaps_for_pid(info->ppid);
+		}
+		if (info->pid != info->ppid)
+			fork_pid(info->pid, info->ppid);
+	}	break;
+	case PERF_RECORD_MMAP: {
+		struct perf_mmap {
+			perf_event_header header;
+			perf_info_mmap info;
+		} const *sample = reinterpret_cast<perf_mmap *>(record);
+		const perf_info_mmap *info = &sample->info;
+		const char *filename = reinterpret_cast<const char *>(&sample[1]);
+
+		if ((header->misc & PERF_RECORD_MISC_CPUMODE_MASK)
+		    == PERF_RECORD_MISC_USER
+		    /* Assume the kernel won't give us an unterminated filename. */
+		    && filename[0] == '/' && filename[1] != '/') {
+			test_pid(info->pid);
+			EHAddMMap(pidmap[info->pid], info->addr, info->len, filename,
+			    info->offset);
+		}
+	}	break;
+	}
+	if (alloced)
+		free(record);
 	return header->size;
 }
 
@@ -430,8 +480,7 @@ main(int argc, char **argv)
 	    PERF_SAMPLE_TID |
 	    PERF_SAMPLE_TIME |
 	    PERF_SAMPLE_CALLCHAIN |
-	    PERF_SAMPLE_CPU |
-	    PERF_SAMPLE_PERIOD;
+	    PERF_SAMPLE_CPU;
 	attr.read_format = 0;
 	attr.inherit = 1;
 	attr.mmap = 1;
@@ -549,7 +598,7 @@ main(int argc, char **argv)
 	header.sample_type = attr.sample_type;
 	fwrite(&header, sizeof(header), 1, outfile);
 	synthetic_mmaps_for_kernel();
-	mark_pid(0);
+	test_pid(0);
 	do {
 		live = cpus;
 		if (!exiting)
