@@ -238,7 +238,7 @@ private:
   }
 
   uint32_t &vSP() { return mRegs[R_SP]; }
-  uint32_t *ptrSP() { return reinterpret_cast<uint32_t *>(vSP()); }
+  const uint32_t *ptrSP() { return reinterpret_cast<const uint32_t *>((const char*)mStack + (vSP() - mStackLimit)); }
 
   void checkStackBase() { if (vSP() > mStackBase) mFailed = true; }
   void checkStackLimit() { if (vSP() < mStackLimit) mFailed = true; }
@@ -339,7 +339,7 @@ void EHInterp::step() {
   if ((insn & M_POPN) == I_POPN) {
     uint8_t n = (insn & 0x07) + 1;
     bool lr = insn & 0x08;
-    uint32_t *ptr = ptrSP();
+    const uint32_t *ptr = ptrSP();
     vSP() += (n + (lr ? 1 : 0)) * 4;
     checkStackBase();
     if (mFailed)
@@ -610,7 +610,7 @@ void EHAddMMap(EHAddrSpace *aSpace, uint32_t aAddr, uint32_t aLen,
   aSpace->mmap(aAddr, aLen, aPath, aOffset);
 }
 
-size_t EHUnwind(EHAddrSpace *aSpace, const uint32_t aRegs[16],
+size_t EHUnwind(const EHAddrSpace *aSpace, const uint32_t aRegs[16],
                 const void *aStack, size_t aStackSize,
                 uint32_t *aPCs, size_t aNumFrames)
 {
