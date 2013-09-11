@@ -8,8 +8,8 @@ struct miniperf_header {
 
 #define MINIPERF_MAGIC 0x66726550696e694dULL
 
-#define MINIPERF_HEADER_INIT(sample) { \
-	.magic = MINIPERF_MAGIC,       \
-	.reserved = 0,                 \
-	.sample_type = sample          \
+#define MINIPERF_HEADER_INIT(sample) {	\
+	/* .magic = */ MINIPERF_MAGIC,	\
+	/* .reserved = */ 0,		\
+	/* .sample_type = */ sample	\
 }

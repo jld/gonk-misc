@@ -1,4 +1,4 @@
-#define _GNU_SOURCE
+#define __STDC_FORMAT_MACROS
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
@@ -15,6 +15,11 @@
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <unistd.h>
+
+#include <vector>
+#include <algorithm>
+#include <set>
+
 #include "perf_event.h"
 #include "perf.h"
 #include "miniperf.h"
@@ -264,13 +269,8 @@ struct kmodule {
 	char *name;
 };
 
-static int
-kmodule_cmp(const void *a, const void *b) {
-	uint64_t as, bs;
-
-	as = ((const struct kmodule *)a)->start;
-	bs = ((const struct kmodule *)b)->start;
-	return as < bs ? -1 : as > bs ? 1 : 0;
+static bool operator<(const kmodule &a, const kmodule &b) {
+	return a.start < b.start;
 }
 
 static void
@@ -282,8 +282,7 @@ synthetic_mmaps_for_kernel(void)
 	FILE *modules, *kallsyms;
 	char *linebuf = NULL;
 	size_t linebufsize;
-	struct kmodule *mod_acc;
-	size_t mod_read, mod_alloc, i;
+	std::vector<kmodule> mod_acc;
 
 	kallsyms = fopen("/proc/kallsyms", "r");
 	if (!kallsyms) {
@@ -291,9 +290,7 @@ synthetic_mmaps_for_kernel(void)
 		    strerror(errno));
 		return;
 	}
-	mod_acc = malloc(sizeof(mod_acc[0]));
-	mod_alloc = 1;
-	mod_read = 1;
+	mod_acc.resize(1);
 	mod_acc[0].start = 0;
 	mod_acc[0].name = strdup(kmodname);
 	for (;;) {
@@ -333,64 +330,43 @@ synthetic_mmaps_for_kernel(void)
 			&thismod.start) < 1)
 			continue;
 		asprintf(&thismod.name, "[%s]", linebuf);
-		if (mod_read >= mod_alloc) {
-			mod_alloc = mod_alloc * 2 + 1;
-			mod_acc = realloc(mod_acc, mod_alloc
-			    * sizeof(mod_acc[0]));
-		}
-		mod_acc[mod_read++] = thismod;
+		mod_acc.push_back(thismod);
 	}
 	free(linebuf);
 	fclose(modules);
-	qsort(mod_acc, mod_read, sizeof(mod_acc[0]), kmodule_cmp);
+
+	std::sort(mod_acc.begin(), mod_acc.end());
 
 	id.time = 0;
 	id.cpu = id.res = 0;
 	id.pid = info.pid = -1;
 	id.tid = info.tid = 0;
 	info.offset = 0;
-	for (i = 0; i < mod_read; ++i) {
+	for (size_t i = 0; i < mod_acc.size(); ++i) {
 		uint64_t modend;
 
-		modend = i + 1 < mod_read ? mod_acc[i + 1].start : 0;
+		modend = i + 1 < mod_acc.size() ? mod_acc[i + 1].start : 0;
 		info.addr = mod_acc[i].start;
 		info.len = modend - info.addr;
 		synthetic_mmap(&info, &id, mod_acc[i].name,
 		    PERF_RECORD_MISC_KERNEL);
 		free(mod_acc[i].name);
+		mod_acc[i].name = NULL;
 	}
-	free(mod_acc);
 }
 
-static uint32_t *pidmap = NULL;
-static uint32_t pidsize = 0;
-
-static void
-enlarge_pidmap(uint32_t pid)
-{
-	uint32_t newsize = pidsize;
-
-	while (pid >= newsize)
-		newsize = newsize > 0 ? newsize * 2 : 512;
-	if (newsize == pidsize)
-		return;
-	pidmap = realloc(pidmap, newsize / 8);
-	memset(pidmap + pidsize / 32, 0, (newsize - pidsize) / 8);
-	pidsize = newsize;
-}
+static std::set<uint32_t> pidmap;
 
 static int
 test_pid(uint32_t pid)
 {
-	enlarge_pidmap(pid);
-	return !!(pidmap[pid / 32] & (((uint32_t)1) << (pid % 32)));
+	return pidmap.find(pid) != pidmap.end();
 }
 
-static int
+static void
 mark_pid(uint32_t pid)
 {
-	enlarge_pidmap(pid);
-	return pidmap[pid / 32] |= ((uint32_t)1) << (pid % 32);
+	pidmap.insert(pid);
 }
 
 static size_t
@@ -546,9 +522,10 @@ main(int argc, char **argv)
 	cpus = sysconf(_SC_NPROCESSORS_CONF);
 	page_size = sysconf(_SC_PAGESIZE);
 	buf_size = page_size * buf_pages;
-	setbuffer(outfile, malloc(buf_size), buf_size);
-	fds = calloc(cpus, sizeof(fds[0]));
-	bufs = calloc(cpus, sizeof(bufs[0]));
+	setbuffer(outfile, new char[buf_size], buf_size);
+	fds = new pollfd[cpus];
+	memset(fds, 0, sizeof(pollfd[cpus]));
+	bufs = new volatile perf_event_mmap_page *[cpus];
 	for (i = 0; i < cpus; ++i) {
 		fds[i].fd = syscall(__NR_perf_event_open, &attr, -1, i, -1, 0);
 		if (fds[i].fd < 0) {
@@ -556,12 +533,13 @@ main(int argc, char **argv)
 			return 1;
 		}
 		fds[i].events = POLLIN;
-		bufs[i] = mmap(NULL, page_size + buf_size,
+		void *buf = mmap(NULL, page_size + buf_size,
 		    PROT_READ | PROT_WRITE, MAP_SHARED, fds[i].fd, 0);
-		if (bufs[i] == MAP_FAILED) {
+		if (buf == MAP_FAILED) {
 			perror("mmap");
 			return 1;
 		}
+		bufs[i] = reinterpret_cast<volatile perf_event_mmap_page *>(buf);
 		// TODO: map a guard page here to protect me from myself?
 	}
 
@@ -591,7 +569,7 @@ main(int argc, char **argv)
 			    exiting ? "will be drained" : "has stuff");
 #endif
 
-			base = (void *)((uintptr_t)(bufs[i]) + page_size);
+			base = (uint8_t *)((uintptr_t)(bufs[i]) + page_size);
 			head = bufs[i]->data_head;
 			tail = bufs[i]->data_tail;
 			rmb();
@@ -640,7 +618,7 @@ minigetline(char **lineptr, size_t *n, FILE *stream)
 
 	if (!*lineptr) {
 		*n = 64;
-		*lineptr = malloc(*n);
+		*lineptr = reinterpret_cast<char *>(malloc(*n));
 	}
 	for (;;) {
 		size_t this_time;
@@ -659,7 +637,7 @@ minigetline(char **lineptr, size_t *n, FILE *stream)
 			break;
 		}
 		*n *= 2;
-		*lineptr = realloc(*lineptr, *n);
+		*lineptr = reinterpret_cast<char *>(realloc(*lineptr, *n));
 	}
 	if ((*lineptr)[so_far - 1] != '\n') {
 		so_far++;
