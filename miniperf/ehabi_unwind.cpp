@@ -96,20 +96,20 @@ class EHMapping {
   uintptr_t mMappedStart;
   EHMapping *mNext;
 public:
-  EHMapping(const EHTable *aTable, uint32_t aStart, uint32_t aEnd, 
+  EHMapping(const EHTable *aTable, uint32_t aStart, uint32_t aEnd,
             const void *aMappedStart, EHMapping *aNext)
-    : mTable(aTable), 
+    : mTable(aTable),
       mStart(aStart),
       mEnd(aEnd),
       mMappedStart(reinterpret_cast<uintptr_t>(aMappedStart)),
       mNext(aNext)
   { }
-  bool lookup(uint32_t aAddr, const EHTable *&aTableOut, 
+  bool lookup(uint32_t aAddr, const EHTable *&aTableOut,
               const void *&aMappedOut) {
     for (EHMapping *here = this; here != NULL; here = here->mNext) {
       if (aAddr >= here->mStart && aAddr < here->mEnd) {
         aTableOut = here->mTable;
-        aMappedOut = reinterpret_cast<const void *>((aAddr - here->mStart) 
+        aMappedOut = reinterpret_cast<const void *>((aAddr - here->mStart)
                                                     + here->mMappedStart);
         return true;
       }
@@ -124,9 +124,12 @@ class EHAddrSpace {
   static const EHTable *mapFile(const char *aPath);
 public:
   EHAddrSpace() { memset(&mMaps, 0, sizeof(mMaps)); }
+  explicit EHAddrSpace(const EHAddrSpace *aSpace) {
+    memcpy(&mMaps, &aSpace->mMaps, sizeof(mMaps));
+  }
   void mmap(uint32_t aAddr, uint32_t aLen, const char *aPath, uint32_t aOffset);
-  bool lookup(uint32_t aPC, const EHTable *&aTableOut, 
-              const void *&aMappedOut) {
+  bool lookup(uint32_t aPC, const EHTable *&aTableOut,
+              const void *&aMappedOut) const {
     return mMaps[aPC >> 22]->lookup(aPC, aTableOut, aMappedOut);
   }
 };
@@ -503,7 +506,7 @@ EHTable::EHTable(FILE *aELF, const std::string &aName)
     return;
   }
   for (unsigned i = 0; i < file.e_phnum; ++i) {
-    const Elf32_Phdr &phdr = 
+    const Elf32_Phdr &phdr =
       *reinterpret_cast<const Elf32_Phdr*>(&phbuf[file.e_phentsize * i]);
     if (phdr.p_type == PT_LOAD) {
       vMin = std::min(vMin, phdr.p_vaddr);
@@ -523,7 +526,7 @@ EHTable::EHTable(FILE *aELF, const std::string &aName)
   }
   uintptr_t baseAddr = reinterpret_cast<uintptr_t>(mMapBase);
   for (unsigned i = 0; i < file.e_phnum; ++i) {
-    const Elf32_Phdr &phdr = 
+    const Elf32_Phdr &phdr =
       *reinterpret_cast<const Elf32_Phdr*>(&phbuf[file.e_phentsize * i]);
     if (phdr.p_type == PT_LOAD && phdr.p_memsz > 0 && phdr.p_filesz > 0) {
       uintptr_t vStart = baseAddr + (phdr.p_vaddr - vMin);
@@ -585,9 +588,25 @@ const EHTable *EHAddrSpace::mapFile(const char *aPath) {
 }
 
 
-size_t ehabi_unwind(EHAddrSpace *aSpace, const uint32_t aRegs[16],
-                    const void *aStack, size_t aStackSize,
-                    uint32_t *aPCs, size_t aNumFrames)
+EHAddrSpace *EHNewSpace()
+{
+  return new EHAddrSpace();
+}
+
+EHAddrSpace *EHForkSpace(const EHAddrSpace *aSpace)
+{
+  return new EHAddrSpace(aSpace);
+}
+
+void EHAddMMap(EHAddrSpace *aSpace, uint32_t aAddr, uint32_t aLen,
+               const char *aPath, uint32_t aOffset)
+{
+  aSpace->mmap(aAddr, aLen, aPath, aOffset);
+}
+
+size_t EHUnwind(EHAddrSpace *aSpace, const uint32_t aRegs[16],
+                const void *aStack, size_t aStackSize,
+                uint32_t *aPCs, size_t aNumFrames)
 {
   EHInterp interp(aRegs, aStack, aStackSize);
   size_t count = 0;
@@ -612,7 +631,7 @@ size_t ehabi_unwind(EHAddrSpace *aSpace, const uint32_t aRegs[16],
     if (!interp.unwind(entry))
       break;
   }
-  
+
   return count;
 }
 
