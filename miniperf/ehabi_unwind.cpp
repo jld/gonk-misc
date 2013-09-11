@@ -520,7 +520,7 @@ EHTable::EHTable(FILE *aELF, const std::string &aName)
   vMin = (vMin / page_size) * page_size;
   mMapLen = vMax - vMin;
   mMapBase = mmap(NULL, mMapLen, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-  if (mMapBase == reinterpret_cast<const void *>(-1)) {
+  if (mMapBase == MAP_FAILED) {
     free(phbuf);
     return;
   }
@@ -535,7 +535,7 @@ EHTable::EHTable(FILE *aELF, const std::string &aName)
       void *mapped = mmap(reinterpret_cast<void*>(vStart - padding),
                           mapsz + padding, PROT_READ, MAP_PRIVATE | MAP_FIXED,
                           fileno(aELF), phdr.p_offset - padding);
-      if (mapped == reinterpret_cast<void *>(-1)) {
+      if (mapped == MAP_FAILED) {
         free(phbuf);
         return;
       }
