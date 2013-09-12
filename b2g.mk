@@ -26,7 +26,7 @@ PRODUCT_PACKAGES += \
   librecovery
 endif
 
-ifneq ($(or $(B2G_PROFILING),0),0)
+ifneq ($(or $(MOZ_PROFILING),0),0)
 PRODUCT_PACKAGES += \
   miniperf-record
 endif
