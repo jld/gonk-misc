@@ -105,6 +105,15 @@ LOCAL_FORCE_STATIC_EXECUTABLE := true	# since this is setuid root
 LOCAL_SHARED_LIBRARIES :=
 include $(BUILD_EXECUTABLE)
 
+ifneq (,$(wildcard $(LOCAL_PATH)/gdbserver/$(TARGET_PREBUILT_TAG)-gdbserver))
+include $(CLEAR_VARS)
+LOCAL_MODULE             := gdbserver.new
+LOCAL_MODULE_TAGS        := debug
+LOCAL_MODULE_CLASS       := EXECUTABLES
+LOCAL_SRC_FILES          := gdbserver/$(TARGET_PREBUILT_TAG)-gdbserver
+include $(BUILD_PREBUILT)
+endif
+
 $(OUT_DOCS)/api-stubs-timestamp:
 	mkdir -p `dirname $@`
 	touch $@

@@ -38,3 +38,8 @@ ifneq ($(DISABLE_SOURCES_XML),true)
 PRODUCT_PACKAGES += \
 	sources.xml
 endif
+
+ifneq (,$(wildcard $(call my-dir)/gdbserver/$(TARGET_PREBUILT_TAG)-gdbserver))
+PRODUCT_PACKAGES += \
+	gdbserver.new
+endif
